@@ -5,6 +5,23 @@
       "name": "ava",
       "department": "finance",
       "annual_leave_days": 3,
+      "leave_requests": [
+        {
+          "request_id": "L001",
+          "leave_type": "annual",
+          "start_date": "2026-10-09",
+          "end_date": "2026-10-09",
+          "days": 1,
+          "reason": "sick",
+          "status": "submitted"
+        }
+      ]
+    },
+    "101": {
+      "employee_id": "101",
+      "name": "Prakash Shrestha",
+      "department": "Mathematics and Computer Science",
+      "annual_leave_days": 20,
       "leave_requests": []
     }
   }

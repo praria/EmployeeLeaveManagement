@@ -1,6 +1,7 @@
-"""Console program for employee leave registration, requests, and export."""
+"""Employee leave records, shared by the console program and the Streamlit app."""
 
 import csv
+import io
 import json
 from datetime import date
 from pathlib import Path
@@ -32,6 +33,9 @@ CSV_FIELDS = (
     "remaining_leave_days",
     *REQUEST_FIELDS,
 )
+BASE_DIR = Path(__file__).resolve().parent
+DATA_PATH = BASE_DIR / "employees.json"
+CSV_PATH = BASE_DIR / "leave_records.csv"
 
 
 def empty_records():
@@ -91,21 +95,33 @@ def save_records(records, path):
     return True
 
 
+def export_rows(records):
+    """One row per leave request. Employees with none still get a row."""
+    rows = []
+    for employee in records["employees"].values():
+        remaining = remaining_leave_days(employee)
+        requests = employee["leave_requests"]
+        if not requests:
+            rows.append(_csv_row(employee, remaining, None))
+            continue
+        for request in requests:
+            rows.append(_csv_row(employee, remaining, request))
+    return rows
+
+
+def records_as_csv(records):
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=CSV_FIELDS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(export_rows(records))
+    return buffer.getvalue()
+
+
 def export_csv(records, path):
-    """Write one CSV row per leave request. Employees with none still get a row."""
+    """Write export_rows to a CSV file. Return True when the file is written."""
     path = Path(path)
     try:
-        with path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
-            writer.writeheader()
-            for employee in records["employees"].values():
-                remaining = remaining_leave_days(employee)
-                requests = employee["leave_requests"]
-                if not requests:
-                    writer.writerow(_csv_row(employee, remaining, None))
-                    continue
-                for request in requests:
-                    writer.writerow(_csv_row(employee, remaining, request))
+        path.write_text(records_as_csv(records), encoding="utf-8")
     except OSError as exc:
         print(f"Could not export records to {path}: {exc}")
         return False
@@ -132,7 +148,127 @@ def remaining_leave_days(employee):
 
 
 def find_employee(records, employee_id):
+    if not isinstance(employee_id, str):
+        return None
     return records["employees"].get(employee_id.strip())
+
+
+def balance_summary(employee):
+    return {
+        "allowance": employee["annual_leave_days"],
+        "used": used_leave_days(employee),
+        "remaining": remaining_leave_days(employee),
+    }
+
+
+def employee_rows(records):
+    rows = []
+    for employee in records["employees"].values():
+        summary = balance_summary(employee)
+        rows.append(
+            {
+                "Employee id": employee["employee_id"],
+                "Name": employee["name"],
+                "Department": employee["department"],
+                "Allowance": summary["allowance"],
+                "Used": summary["used"],
+                "Remaining": summary["remaining"],
+            }
+        )
+    return rows
+
+
+def request_rows(records):
+    rows = []
+    for employee in records["employees"].values():
+        for request in employee["leave_requests"]:
+            rows.append(
+                {
+                    "Request id": request["request_id"],
+                    "Employee id": employee["employee_id"],
+                    "Name": employee["name"],
+                    "Type": request["leave_type"],
+                    "Start": request["start_date"],
+                    "End": request["end_date"],
+                    "Days": request["days"],
+                    "Status": request["status"],
+                    "Reason": request["reason"],
+                }
+            )
+    return rows
+
+
+def search_employees(records, query):
+    query = query.strip()
+    if not query:
+        return []
+    needle = query.lower()
+    return [
+        employee
+        for employee in records["employees"].values()
+        if employee["employee_id"].lower() == needle or needle in employee["name"].lower()
+    ]
+
+
+def register_employee_record(records, employee_id, name, department, allowance):
+    """Add an employee. Return an error message, or None when the record is added."""
+    employee_id = employee_id.strip()
+    name = name.strip()
+    department = department.strip()
+    if not employee_id:
+        return "Employee id is required."
+    if employee_id in records["employees"]:
+        return f"{employee_id} is already registered."
+    if not name:
+        return "Name is required."
+    if isinstance(allowance, bool) or not isinstance(allowance, int) or allowance < 0:
+        return "Annual leave days must be a whole number zero or greater."
+
+    records["employees"][employee_id] = {
+        "employee_id": employee_id,
+        "name": name,
+        "department": department,
+        "annual_leave_days": allowance,
+        "leave_requests": [],
+    }
+    return None
+
+
+def submit_leave_request(records, employee_id, leave_type, start, end, reason):
+    """Store a leave request. Return an error message, or None when it is stored."""
+    employee = find_employee(records, employee_id if isinstance(employee_id, str) else "")
+    if employee is None:
+        shown_id = employee_id.strip() if isinstance(employee_id, str) else employee_id
+        return f"No employee with id {shown_id}."
+
+    leave_type = leave_type.strip().lower() if isinstance(leave_type, str) else ""
+    if leave_type not in LEAVE_TYPES:
+        return "Leave type must be annual, sick, or unpaid."
+
+    start_date = _as_date(start)
+    end_date = _as_date(end)
+    if start_date is None or end_date is None:
+        return "Use a date in YYYY-MM-DD form."
+    if end_date < start_date:
+        return "End date must be on or after the start date."
+
+    days = inclusive_days(start_date, end_date)
+    if leave_type in BALANCE_LEAVE_TYPES:
+        remaining = remaining_leave_days(employee)
+        if days > remaining:
+            return f"That request is {days} days, and {remaining} remain."
+
+    request = {
+        "request_id": next_request_id(records),
+        "leave_type": leave_type,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "days": days,
+        "reason": reason.strip() if isinstance(reason, str) else "",
+        "status": "submitted",
+    }
+    employee["leave_requests"].append(request)
+    return None
 
 
 def next_request_id(records):
@@ -178,13 +314,10 @@ def register_employee(records):
     if allowance is None:
         return
 
-    records["employees"][employee_id] = {
-        "employee_id": employee_id,
-        "name": name,
-        "department": department,
-        "annual_leave_days": allowance,
-        "leave_requests": [],
-    }
+    error = register_employee_record(records, employee_id, name, department, allowance)
+    if error:
+        print(error)
+        return
     print(f"Registered {employee_id}: {name}.")
 
 
@@ -202,12 +335,7 @@ def search_employee(records):
     if not query:
         print("Enter an id or name.")
         return
-    needle = query.lower()
-    matches = [
-        employee
-        for employee in records["employees"].values()
-        if employee["employee_id"].lower() == needle or needle in employee["name"].lower()
-    ]
+    matches = search_employees(records, query)
     if not matches:
         print(f"No employee matches {query!r}.")
         return
@@ -239,24 +367,12 @@ def apply_for_leave(records):
         return
 
     reason = input("Reason: ").strip()
-    days = inclusive_days(start, end)
-    if leave_type in BALANCE_LEAVE_TYPES:
-        remaining = remaining_leave_days(employee)
-        if days > remaining:
-            print(f"That request is {days} days, and {remaining} remain.")
-            return
-
-    request = {
-        "request_id": next_request_id(records),
-        "leave_type": leave_type,
-        "start_date": start.isoformat(),
-        "end_date": end.isoformat(),
-        "days": days,
-        "reason": reason,
-        "status": "submitted",
-    }
-    employee["leave_requests"].append(request)
-    print(f"Submitted {request['request_id']} for {days} day(s).")
+    error = submit_leave_request(records, employee_id, leave_type, start, end, reason)
+    if error:
+        print(error)
+        return
+    request = employee["leave_requests"][-1]
+    print(f"Submitted {request['request_id']} for {request['days']} day(s).")
 
 
 def check_leave_balance(records):
@@ -293,9 +409,8 @@ def confirm_exit():
 
 
 def main():
-    base = Path(__file__).resolve().parent
-    data_path = base / "employees.json"
-    csv_path = base / "leave_records.csv"
+    data_path = DATA_PATH
+    csv_path = CSV_PATH
     records = load_records(data_path)
     if records is None:
         raise SystemExit(1)
@@ -367,6 +482,17 @@ def _read_allowance():
         print("Annual leave days cannot be negative.")
         return None
     return allowance
+
+
+def _as_date(value):
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        return None
 
 
 def _read_date(label):
