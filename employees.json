@@ -1,0 +1,11 @@
+{
+  "employees": {
+    "100": {
+      "employee_id": "100",
+      "name": "ava",
+      "department": "finance",
+      "annual_leave_days": 3,
+      "leave_requests": []
+    }
+  }
+}
